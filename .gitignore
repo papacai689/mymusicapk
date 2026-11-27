@@ -1,0 +1,11 @@
+.expo/
+node_modules/
+dist/
+.tmp-*/
+*.log
+build/
+*.apk
+*.partial
+/android
+/ios
+

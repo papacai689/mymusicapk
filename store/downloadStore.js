@@ -1,0 +1,16 @@
+import { create } from 'zustand';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createSongDownload, FileSystem } from '../services/downloadService';
+import { publishToPublicDir } from '../services/publicDownloadDir';
+const KEY='download_tasks_v1';
+const activeTasks=new Map();
+const serializable=(tasks)=>Object.fromEntries(Object.entries(tasks).map(([id,item])=>{const {task,...safe}=item;return [id,safe]}));
+export const useDownloadStore=create((set,get)=>({
+ tasks:{},hydrated:false,
+ hydrate:async()=>{try{const raw=await AsyncStorage.getItem(KEY);set({tasks:raw?JSON.parse(raw):{},hydrated:true})}catch{set({hydrated:true})}},
+ persist:async(tasks)=>{try{await AsyncStorage.setItem(KEY,JSON.stringify(serializable(tasks)))}catch{}},
+ start:async(song)=>{const id=String(song.id);if(get().tasks[id]?.status==='completed'||activeTasks.has(id))return;set(s=>({tasks:{...s.tasks,[id]:{...song,id,status:'downloading',progress:0,error:null}}}));try{const {task,fileUri}=await createSongDownload(song,p=>{const progress=p.totalBytesExpectedToWrite>0?p.totalBytesWritten/p.totalBytesExpectedToWrite:0;set(s=>{const tasks={...s.tasks,[id]:{...s.tasks[id],progress,status:'downloading'}};get().persist(tasks);return {tasks}})});activeTasks.set(id,task);set(s=>({tasks:{...s.tasks,[id]:{...s.tasks[id],fileUri}}}));const result=await task.downloadAsync();activeTasks.delete(id);const finalUri=result?.uri||fileUri;publishToPublicDir(finalUri);set(s=>{const tasks={...s.tasks,[id]:{...s.tasks[id],status:'completed',progress:1,fileUri:finalUri,resumeData:null}};get().persist(tasks);return {tasks}})}catch(error){activeTasks.delete(id);set(s=>{const tasks={...s.tasks,[id]:{...s.tasks[id],status:'paused',error:error?.message||'下载失败'}};get().persist(tasks);return {tasks}})}},
+ pause:async(id)=>{const key=String(id),task=activeTasks.get(key);if(!task)return;try{const resumeData=await task.pauseAsync();activeTasks.delete(key);set(s=>{const tasks={...s.tasks,[key]:{...s.tasks[key],status:'paused',resumeData}};get().persist(tasks);return {tasks}})}catch{}},
+ resume:async(id)=>{const key=String(id),item=get().tasks[key];if(!item||activeTasks.has(key))return;try{const {task,fileUri}=await createSongDownload(item,p=>{const progress=p.totalBytesExpectedToWrite>0?p.totalBytesWritten/p.totalBytesExpectedToWrite:0;set(s=>({tasks:{...s.tasks,[key]:{...s.tasks[key],progress,status:'downloading'}}}))},item.resumeData);activeTasks.set(key,task);set(s=>({tasks:{...s.tasks,[key]:{...s.tasks[key],status:'downloading',fileUri}}}));const result=await task.downloadAsync();activeTasks.delete(key);const finalUri=result?.uri||fileUri;publishToPublicDir(finalUri);set(s=>{const tasks={...s.tasks,[key]:{...s.tasks[key],status:'completed',progress:1,fileUri:finalUri,resumeData:null}};get().persist(tasks);return {tasks}})}catch(error){activeTasks.delete(key);set(s=>({tasks:{...s.tasks,[key]:{...s.tasks[key],status:'paused',error:error?.message||'恢复失败'}}}))}},
+ cancel:async(id)=>{const key=String(id);try{await activeTasks.get(key)?.cancelAsync()}catch{}activeTasks.delete(key);const item=get().tasks[key];try{if(item?.fileUri)await FileSystem.deleteAsync(item.fileUri,{idempotent:true})}catch{}set(s=>{const tasks={...s.tasks};delete tasks[key];get().persist(tasks);return {tasks}})},remove:async(id)=>get().cancel(id)
+}));
